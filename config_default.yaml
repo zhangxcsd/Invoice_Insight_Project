@@ -1,0 +1,155 @@
+# VAT发票审计流水线默认配置
+# 如需修改，请在 config.yaml 中覆盖；未提供的项将使用此默认值。
+
+# ===== 项目标识 =====
+business:
+  tag: "VAT_INV"
+  description: "增值税发票专项审计"
+
+# ===== 目录配置 =====
+paths:
+  input_dir: "Source_Data"
+  database_dir: "Database"
+  output_dir: "Outputs"
+
+# ===== 并行处理配置 =====
+parallel:
+  enabled: true
+  worker_count: "auto"
+  dynamic_worker_adjustment: true
+  file_size_thresholds:
+    small: 10
+    medium: 50
+    large: 200
+
+# ===== 内存与性能配置 =====
+performance:
+  csv_chunk_size: 10000
+  stream_chunk_size: 50000
+  stream_chunk_dynamic: true
+  stream_chunk_memory_percent: 0.1
+  memory_monitoring:
+    enabled: true
+    memory_threshold_percent: 80
+    stream_switch_threshold_percent: 75
+    monitor_interval_seconds: 0.5
+    initial_memory_check: true
+    large_file_streaming_mb: 100
+  io_throttle:
+    enabled: true
+    busy_threshold_percent: 75   # 磁盘忙碌阈值，超过则降 worker
+    sample_seconds: 0.25         # 采样时间窗口（秒）
+    reduce_factor: 0.5           # 降低 worker 的比例
+    min_workers: 1               # 最少保留的 worker 数
+  queue_mode:
+    enabled: true
+    min_memory_mb: 2000
+    queue_size_divisor: 500
+
+# ===== 数据处理配置 =====
+data_processing:
+  max_failure_samples: 100
+  tax_text_to_zero: true
+  filter_empty_rows: true
+  filter_nan_rows: true
+
+# ===== Sheet分类规则 =====
+sheet_classification:
+  detail_patterns:
+    - "发票基础信息"
+    - ".*明细.*"
+  header_patterns:
+    - "信息汇总表"
+    - ".*汇总.*"
+  summary_patterns:
+    - "信息汇总表"
+  special_sheets:
+    建筑服务: "building_service"
+    铁路电子客票: "railway"
+    机动车销售统一发票: "vehicle"
+    货物运输服务: "freight"
+    旅客运输服务: "passenger"
+    不动产经营租赁服务: "real_estate"
+  ignored_patterns:
+    - "^Sheet\\d+$"
+    - "^说明$"
+    - "^备注$"
+
+# ===== 列名映射配置 =====
+column_mapping:
+  date_columns:
+    - "开票日期"
+    - "认证日期"
+  numeric_columns:
+    - "金额"
+    - "税额"
+    - "单价"
+    - "数量"
+    - "价税合计"
+  tax_rate_columns:
+    - "税率"
+  tax_text_tokens:
+    - "免税"
+    - "不征税"
+    - "免征"
+
+# ===== 日志配置 =====
+logging:
+  enabled: true
+  log_to_file: true
+  log_file: "vat_audit.log"
+  log_level: "INFO"
+  max_bytes: 10485760
+  backup_count: 5
+  debug_enabled: false
+
+# ===== SQLite优化配置 =====
+database:
+  wal_mode: true
+  synchronous: "OFF"
+  journal_mode: "WAL"
+  cache_size: -64000
+  temp_store: "MEMORY"
+  batch_operations:
+    enabled: true
+    method: "multi"
+    chunksize: 500
+
+# ===== 索引策略 =====
+indexes:
+  create_after_insert: true
+  batch_create: true
+  auto_index_columns:
+    - "开票日期"
+    - "开票年份"
+    - "发票代码"
+    - "发票号码"
+    - "数电发票号码"
+
+# ===== 去重策略 =====
+deduplication:
+  enabled: true
+  keep: "first"
+  primary_keys:
+    - "发票代码"
+    - "发票号码"
+  alternative_keys:
+    - "数电发票号码"
+
+# ===== 输出配置 =====
+output:
+  export_duplicates: true
+  export_type_cast_manifest: true
+  export_failure_samples: true
+  export_error_logs: true
+  formats:
+    duplicates: "xlsx"
+    manifests: "csv"
+    error_logs: ["csv", "json"]
+
+# ===== 高级功能开关 =====
+features:
+  year_column_optimization: true
+  memory_monitoring: true
+  performance_profiling: true
+  auto_vacuum: false

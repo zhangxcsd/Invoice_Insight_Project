@@ -1,0 +1,182 @@
+# VAT发票审计流水线配置文件
+# 修改此文件后无需改动代码即可生效
+# 注释包含：含义 / 取值范围 / 默认值（默认值来自 config_default.yaml，可删掉字段使用默认）
+
+# ===== 项目标识 =====
+business:
+  tag: "VAT_INV"            # 业务标识；影响数据库文件名与表前缀；默认 VAT_INV，需为字母数字下划线
+  description: "增值税发票专项审计"  # 业务描述，纯注释，不影响运行
+
+# ===== 目录配置 =====
+paths:
+  input_dir: "Source_Data"   # 原始数据目录；默认 Source_Data；可相对/绝对；需存在
+  database_dir: "Database"   # 数据库目录；默认 Database；需存在
+  output_dir: "Outputs"      # 输出目录；默认 Outputs；需存在
+
+# ===== 并行处理配置 =====
+parallel:
+  enabled: true                 # 并行导入开关；默认 true
+  worker_count: "auto"          # worker 数；"auto"=CPU-1，或正整数；需 >=1
+  dynamic_worker_adjustment: true # 按文件大小动态调节 worker；默认 true
+  # 文件大小阈值（MB）用于动态 worker 调整
+  file_size_thresholds:
+    small: 10     # 默认 10MB；小文件用更少 worker
+    medium: 50    # 默认 50MB
+    large: 200    # 默认 200MB；大于此视为大文件
+
+# ===== 内存与性能配置 =====
+performance:
+  csv_chunk_size: 10000         # 合并临时CSV时的读取块大小；正整数；默认 10000
+  stream_chunk_size: 50000      # 流式处理默认块大小；正整数；默认 50000
+  stream_chunk_dynamic: true    # 是否按可用内存动态块大小；默认 true
+  stream_chunk_memory_percent: 0.1 # 动态块大小占可用内存比例；0-1；默认 0.1
+  # 内存监控与自动流式处理
+  memory_monitoring:
+    enabled: true                # 启用内存监控；默认 true
+    memory_threshold_percent: 80  # 发警告阈值（%）；默认 80
+    stream_switch_threshold_percent: 75 # 切换流式阈值（%）；默认 75
+    monitor_interval_seconds: 0.5 # 检查间隔秒；默认 0.5
+    initial_memory_check: true    # 处理前做一次检查；默认 true
+    large_file_streaming_mb: 100  # 超过此大小强制流式（MB）；默认 100
+  # 磁盘 I/O 限流（并行导入时降低 worker）
+  io_throttle:
+    enabled: true                # 是否根据磁盘 busy 率降 worker；默认 true
+    busy_threshold_percent: 75   # busy 超过此阈值降 worker；默认 75
+    sample_seconds: 0.25         # busy 采样窗口秒；默认 0.25
+    reduce_factor: 0.5           # 降低比例；默认 0.5（减半）
+    min_workers: 1               # 最少保留 worker；默认 1
+  
+  # Queue模式配置
+  queue_mode:
+    enabled: true               # DataFrame 共享队列模式；默认 true
+    min_memory_mb: 2000         # 队列模式需要的最小可用内存；默认 2000MB
+    queue_size_divisor: 500     # 队列大小=可用内存MB/此值；默认 500
+
+# ===== 数据处理配置 =====
+data_processing:
+  max_failure_samples: 100      # 失败样本每列最多导出行数；正整数；默认 100
+  tax_text_to_zero: true        # 将 '免税'/'不征税'/'免征' 映射为 0；默认 true
+  filter_empty_rows: true       # 流式读取时过滤空行；默认 true
+  filter_nan_rows: true         # 流式读取时过滤全 NaN 行；默认 true
+
+# ===== Sheet分类规则 =====
+# 使用正则表达式匹配sheet名称
+sheet_classification:
+  detail_patterns:              # 明细表（发票基础信息）
+    - "发票基础信息"
+    - ".*明细.*"
+  
+  header_patterns:              # 抬头表（信息汇总）
+    - "信息汇总表"
+    - ".*汇总.*"
+  
+  summary_patterns:             # 汇总表（与header类似，但不同业务场景）
+    - "信息汇总表"
+  
+  special_sheets:               # 特殊业务sheet映射
+    建筑服务: "building_service"
+    铁路电子客票: "railway"
+    机动车销售统一发票: "vehicle"
+    货物运输服务: "freight"
+    旅客运输服务: "passenger"
+    不动产经营租赁服务: "real_estate"
+  
+  ignored_patterns:             # 忽略的sheet（正则）
+    - "^Sheet\\d+$"             # Sheet1, Sheet2等默认名
+    - "^说明$"
+    - "^备注$"
+
+# ===== 列名映射配置 =====
+column_mapping:
+  # 日期类列名
+  date_columns:
+    - "开票日期"
+    - "认证日期"
+  
+  # 数值类列名
+  numeric_columns:
+    - "金额"
+    - "税额"
+    - "单价"
+    - "数量"
+    - "价税合计"
+  
+  # 税率列名
+  tax_rate_columns:
+    - "税率"
+  
+  # 税率文本标记（映射为0的关键词）
+  tax_text_tokens:
+    - "免税"
+    - "不征税"
+    - "免征"
+
+# ===== 日志配置 =====
+logging:
+  enabled: true                 # 是否启用日志；默认 true
+  log_to_file: true             # 输出到文件；默认 true
+  log_file: "vat_audit.log"     # 日志文件名；默认 vat_audit.log
+  log_level: "INFO"             # 日志级别: DEBUG/INFO/WARNING/ERROR；默认 INFO
+  max_bytes: 10485760           # 单文件最大字节；默认 10MB
+  backup_count: 5               # 日志轮转保留数；默认 5
+  debug_enabled: false          # DEBUG 模式（额外抽样导出等）；生产建议 false
+
+# ===== SQLite优化配置 =====
+database:
+  wal_mode: true                # 是否启用 WAL；默认 true
+  synchronous: "OFF"            # PRAGMA synchronous: OFF/NORMAL/FULL；默认 OFF
+  journal_mode: "WAL"           # PRAGMA journal_mode: DELETE/WAL/MEMORY；默认 WAL
+  cache_size: -64000            # PRAGMA cache_size；负数=KB；默认 -64000
+  temp_store: "MEMORY"          # PRAGMA temp_store: MEMORY/FILE；默认 MEMORY
+  
+  # 批量操作配置
+  batch_operations:
+    enabled: true               # 是否批量 to_sql；默认 true
+    method: "multi"             # pandas to_sql method: multi/None；默认 multi
+    chunksize: 500              # to_sql chunksize；正整数；默认 500
+
+# ===== 索引策略 =====
+indexes:
+  create_after_insert: true     # 数据插入后创建索引；默认 true
+  batch_create: true            # 批量创建索引；默认 true
+  
+  # 自动创建的索引列
+  auto_index_columns:
+    - "开票日期"
+    - "开票年份"
+    - "发票代码"
+    - "发票号码"
+    - "数电发票号码"
+
+# ===== 去重策略 =====
+deduplication:
+  enabled: true                 # 是否启用去重；默认 true
+  keep: "first"                # 去重保留策略: first/last；默认 first
+  
+  # 去重键（按优先级）
+  primary_keys:
+    - "发票代码"
+    - "发票号码"
+  
+  alternative_keys:
+    - "数电发票号码"
+
+# ===== 输出配置 =====
+output:
+  export_duplicates: true       # 导出重复记录清单；默认 true
+  export_type_cast_manifest: true # 导出类型转换清单；默认 true
+  export_failure_samples: true  # 导出失败样本；默认 true
+  export_error_logs: true       # 导出结构化错误日志；默认 true
+  
+  # 输出格式
+  formats:
+    duplicates: "xlsx"          # 重复清单格式: xlsx/csv；默认 xlsx
+    manifests: "csv"            # 清单格式: xlsx/csv；默认 csv
+    error_logs: ["csv", "json"] # 错误日志格式；可多选；默认 csv+json
+
+# ===== 高级功能开关 =====
+features:
+  year_column_optimization: true # 是否提取开票年份列优化查询；默认 true
+  memory_monitoring: true        # 是否启用内存监控；默认 true
+  performance_profiling: true    # 是否记录性能指标；默认 true
+  auto_vacuum: false             # 是否启用自动清理；默认 false

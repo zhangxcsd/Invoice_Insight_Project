@@ -1,0 +1,64 @@
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+select = [
+  "F",   # pyflakes
+  "E", "W",  # pycodestyle
+  "I",  # isort
+  "N",  # pep8-naming
+  "D",  # pydocstyle
+  "UP", # pyupgrade
+]
+ignore = [
+  "D100", "D104",  # allow missing module/package docstrings (main script)
+  "D203", "D213",   # docstring whitespace preferences
+]
+exclude = [
+  "__pycache__",
+  "*.ipynb",
+  "Database",
+  "Outputs",
+  "Source_Data",
+  "归档-20260103",
+]
+
+[tool.ruff.pydocstyle]
+convention = "google"
+
+[tool.ruff.isort]
+force-single-line = false
+combine-as-imports = true
+known-first-party = ["utils"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unused_configs = true
+exclude = "(^__pycache__$|Outputs|Database|Source_Data)"
+
+[tool.mypy-report]
+html_report = false
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vat-audit-pipeline"
+version = "1.0.1"
+description = "VAT Invoice Audit Pipeline"
+requires-python = ">=3.10"
+dependencies = [
+    "pandas>=2.0.0",
+    "openpyxl>=3.1.0",
+    "xlrd>=2.0.0",
+    "pyyaml>=6.0",
+    "chardet>=5.0.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["vat_audit_pipeline*"]
+exclude = ["Database*", "Outputs*", "Source_Data*", "tests*", "归档*"]

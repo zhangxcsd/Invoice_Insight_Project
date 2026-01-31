@@ -1,0 +1,6 @@
+pytest
+openpyxl
+xlrd==2.0.1
+ruff
+mypy
+pyinstaller>=6.6.0

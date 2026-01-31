@@ -1,0 +1,24 @@
+{
+    // 使用包方式运行ETL脚本，解决相对导入问题
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "发票主表ETL包方式运行",
+            "type": "python",
+            "request": "launch",
+            "module": "etl.invoice.etl_invoice_header_import",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false
+        },
+        {
+            "name": "发票明细表ETL包方式运行",
+            "type": "python",
+            "request": "launch",
+            "module": "etl.invoice.etl_invoice_detail_import",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false
+        }
+    ]
+}

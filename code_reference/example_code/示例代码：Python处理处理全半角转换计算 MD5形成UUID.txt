@@ -1,0 +1,61 @@
+import hashlib
+import unicodedata
+
+def clean_invoice_string(text):
+    """
+    清洗发票关键字段：全角转半角、去除空格及特定干扰符
+    """
+    if text is None or str(text).lower() in ['nan', 'none', '--', '']:
+        return ""
+    
+    # 1. 强制转换为字符串并去除首尾空格
+    text = str(text).strip()
+    
+    # 2. 全角字符转半角 (处理全角括号、横杠等)
+    text = unicodedata.normalize('NFKC', text)
+    
+    # 3. 去除引号 "" 和双横杠 --
+    text = text.replace('"', '').replace('“', '').replace('”', '')
+    text = text.replace('--', '')
+    
+    return text
+
+def generate_header_uuid(fpdm, fphm, sdfphm):
+    """
+    生成主表 UUID: MD5(代码 + 号码 + 数电号码)
+    """
+    # 按照业务逻辑清洗字段
+    c_fpdm = clean_invoice_string(fpdm)
+    c_fphm = clean_invoice_string(fphm)
+    c_sdfphm = clean_invoice_string(sdfphm)
+    
+    # 严格顺序拼接
+    raw_str = f"{c_fpdm}{c_fphm}{c_sdfphm}"
+    return hashlib.md5(raw_str.encode('utf-8')).hexdigest().upper()
+
+def generate_detail_uuid(fpdm, fphm, sdfphm, logic_line_no):
+    """
+    生成明细表 UUID: MD5(代码 + 号码 + 数电号码 + 逻辑行号)
+    """
+    c_fpdm = clean_invoice_string(fpdm)
+    c_fphm = clean_invoice_string(fphm)
+    c_sdfphm = clean_invoice_string(sdfphm)
+    
+    # 拼接逻辑行号
+    raw_str = f"{c_fpdm}{c_fphm}{c_sdfphm}{logic_line_no}"
+    return hashlib.md5(raw_str.encode('utf-8')).hexdigest().upper()
+
+# --- 测试示例 ---
+if __name__ == "__main__":
+    # 模拟金税导出的带有全角和干扰符的数据
+    data = {
+        "fpdm": "037002100111",
+        "fphm": "１２３４５６７８", # 全角号码
+        "sdfphm": "--"            # 无效字符
+    }
+    
+    h_uuid = generate_header_uuid(data['fpdm'], data['fphm'], data['sdfphm'])
+    d_uuid = generate_detail_uuid(data['fpdm'], data['fphm'], data['sdfphm'], 1)
+    
+    print(f"清洗后生成的主表 UUID: {h_uuid}")
+    print(f"清洗后生成的明细 UUID: {d_uuid}")

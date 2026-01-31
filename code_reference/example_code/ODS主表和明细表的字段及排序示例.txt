@@ -1,0 +1,16 @@
+ODS主表和明细表的字段及排序，他年份或批量处理，只需替换表名即可。
+
+1.ODS主表（ODS_VAT_INV_HEADER_FULL_2023）
+[
+    "header_uuid", "created_at", "created_by", "updated_at", "updated_by", "import_batch_id", "source_system", "source_file", "sync_status", "clean_status",
+    "detail_total_amount", "is_balanced", "balance_diff", "balance_tolerance", "balance_check_time", "balance_check_by", "balance_notes",
+    "related_blue_invoice_uuid", 
+	"fpdm", "fphm", "sdfphm", "xfsbh", "xfmc","gfsbh", "gfmc", "kprq", "invoice_date","invoice_time","je", "se", "jshj", "fply", "fppz", "fpzt", "sfzsfp", "fpfxdj", "kpr", "bz"   
+]
+
+2.ODS明细表（ODS_VAT_INV_DETAIL_FULL_2023）的排序如下，
+[
+    "detail_uuid", "header_uuid", "logic_line_no", "updated_at", "updated_by", "import_batch_id", "source_system", "source_file", "sync_status", "clean_status",
+    "fpdm", "fphm", "sdfphm","xfsbh", "xfmc","gfsbh","gfmc","kprq","invoice_date", "invoice_time","ssflbm","tdywlx","hwlwmc", "ggxh", "dw", "sl", "dj", "je", "slv", "se", "jshj",
+    "fply", "fppz", "fpzt", "sfzsfp", "fpfxdj", "kpr", "bz"
+]

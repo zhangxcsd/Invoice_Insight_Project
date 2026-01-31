@@ -1,0 +1,11 @@
+为了防止代码写乱，不要把审计逻辑写死在 Python 脚本里。建议采用**“SQL 模板化”**思路：
+
+定义规则表：在 SQLite 中建一个 SYS_AUDIT_RULES 表，存储审计逻辑名和对应的 SQL 语句。
+
+示例逻辑：
+
+规则 A (价税不符)：SELECT * FROM DWD_TABLE WHERE abs(je + se - jshj) > 0.01
+
+规则 B (虚增风险)：SELECT * FROM DWD_TABLE WHERE hwlwmc LIKE '%咨询费%' AND jshj > 5000
+
+程序实现：Vibe Code 编写的 Python 程序只需遍历这个规则表，执行 SQL，并将结果写入 AUDIT_LOG_DETAIL。
