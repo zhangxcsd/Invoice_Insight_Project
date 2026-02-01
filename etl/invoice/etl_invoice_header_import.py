@@ -60,10 +60,10 @@ def main():
     source_system = '金税导出'  # 默认值，ODS表已设定
     conn = sqlite3.connect(DB_PATH)
     total_rows = 0
+    all_dfs = []
     for excel_path in excel_files:
         try:
             rel_excel_path = os.path.relpath(excel_path, BASE_DIR)
-            # 强制发票代码、号码、数电发票号码为字符串，防止前导0丢失
             dtype_map = {k: str for k in ['发票代码', '发票号码', '数电发票号码'] if k in pd.read_excel(excel_path, nrows=0).columns}
             df_dict = pd.read_excel(excel_path, sheet_name=None, dtype=dtype_map if dtype_map else None)
             header_sheet = [k for k in df_dict if '发票基础信息' in k]
@@ -75,119 +75,124 @@ def main():
                 logging.warning(f'{rel_excel_path}: 字段重合度过低，疑似混采或模板错误，跳过')
                 continue
             df = align_excel_to_ods(df, EXCEL_TO_ODS_HEADER, ODS_HEADER_COLUMNS)
-            # 剔除合计行：fpdm、fphm、sdfphm全为None/空字符串/空格
-            def is_all_empty(row):
-                return all((pd.isnull(row[col]) or str(row[col]).strip().replace('　', '') == "") for col in ['fpdm', 'fphm', 'sdfphm'])
-            before = len(df)
-            df = df[~df.apply(is_all_empty, axis=1)]
-            removed = before - len(df)
-            if removed > 0:
-                logging.info(f'剔除合计/无效行 {removed} 条（fpdm、fphm、sdfphm全为空/空字符串/空格）')
-            # 处理思路：
-            # 0. 自动补齐SQL定义的默认值（如created_at、created_by、is_balanced等），保证与SQL建表文件一致
-            # 1. fpdm, fphm, sdfphm强制转为字符串，防止小数点、前导0丢失、科学计数法等问题
-            # 2. 从kprq字段自动识别invoice_date和invoice_time，分别按YYYY-MM-DD和HH:MM:SS格式存储
-            # 3. related_blue_invoice_uuid字段自动从bz（备注）中提取：
-            #    a) “对应正数发票代码:xxxx号码:yyyy”表述，拼接为xxxxyyyy字符串
-            #    b) “被红冲蓝字*号码：zzzz...”表述，*可为任意字符，提取zzzz字符串
-            #    匹配顺序为a优先，b次之，均强制以字符串形式存储，防止前导0丢失或科学计数法
-            # 4. 若无此表述则related_blue_invoice_uuid为空
-            for col in ['fpdm', 'fphm', 'sdfphm']:
-                if col in df.columns:
-                    df[col] = df[col].apply(lambda x: str(x) if pd.notnull(x) else x)
-            def extract_date_time(val):
-                import re
-                if pd.isnull(val):
-                    return None, None
-                if isinstance(val, pd.Timestamp):
-                    d = val.strftime('%Y-%m-%d')
-                    t = val.strftime('%H:%M:%S') if val.hour+val.minute+val.second > 0 else None
-                    return d, t
-                s = str(val).strip()
-                m = re.match(r'(\d{4}[/-]\d{1,2}[/-]\d{1,2})', s)
-                date_part = m.group(1).replace('/', '-') if m else None
-                m2 = re.search(r'(\d{1,2}:\d{2}(:\d{2})?)', s)
-                time_part = m2.group(1) if m2 else None
-                if time_part and len(time_part.split(':'))==2:
-                    time_part += ':00'
-                return date_part, time_part
-            df['invoice_date'], df['invoice_time'] = zip(*df['kprq'].map(extract_date_time))
-            # 自动提取蓝单UUID，支持两种模式，且强制字符串存储
-            import re
-            def extract_blue_uuid(bz):
-                """
-                提取规则：
-                1. 优先匹配“对应正数发票代码:xxxx号码:yyyy”，拼接为xxxxyyyy字符串
-                2. 若未命中，再匹配“被红冲蓝字*号码：zzzz...”（*可为任意字符），提取zzzz字符串
-                3. 匹配到的数字均强制以字符串形式存储，防止前导0丢失或科学计数法
-                4. 若无此表述则返回None
-                """
-                if pd.isnull(bz):
-                    return None
-                s = str(bz)
-                # 1. 传统蓝单：对应正数发票代码:xxxx号码:yyyy
-                m = re.search(r'对应正数发票代码[:：]?(\d{10,20})[，, ]*号码[:：]?(\d{6,20})', s)
-                if m:
-                    return str(m.group(1)) + str(m.group(2))
-                # 2. 鲁棒匹配“被红冲蓝字*号码：zzzz...”
-                m2 = re.search(r'被红冲蓝字.*?号码[:：]?(\d{10,30})', s)
-                if m2:
-                    return str(m2.group(1))
-                return None
-            df['related_blue_invoice_uuid'] = df['bz'].map(extract_blue_uuid)
-            df['header_uuid'] = df.apply(gen_header_uuid, axis=1)
-            df['import_batch_id'] = batch_id
-            df['source_system'] = source_system
-            df['source_file'] = os.path.basename(rel_excel_path)
-            # 自动补齐主表四个关键字段的默认值，提升数据一致性和可追溯性：
-            # - created_at：记录创建时间，默认当前时间戳（格式：YYYY-MM-DD HH:MM:SS）
-            # - created_by：记录创建人，默认 'SYSTEM'
-            # - is_balanced：平衡校验状态，默认 '未校验'
-            # - balance_tolerance：平衡容差，默认 0.1
-            # 如源数据已提供则保留，否则自动补齐
-            from datetime import datetime
-            now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            if 'created_at' in df.columns:
-                df['created_at'] = df['created_at'].fillna(now_str)
-            else:
-                df['created_at'] = now_str
-            if 'created_by' in df.columns:
-                df['created_by'] = df['created_by'].fillna('SYSTEM')
-            else:
-                df['created_by'] = 'SYSTEM'
-            if 'is_balanced' in df.columns:
-                df['is_balanced'] = df['is_balanced'].fillna('未校验')
-            else:
-                df['is_balanced'] = '未校验'
-            if 'balance_tolerance' in df.columns:
-                df['balance_tolerance'] = df['balance_tolerance'].fillna(0.1)
-            else:
-                df['balance_tolerance'] = 0.1
-            # 健壮性处理：year为空的行丢弃，统计分布
-            df['year'] = df['invoice_date'].apply(lambda x: str(x)[:4] if pd.notnull(x) and len(str(x)) >= 4 else None)
-            invalid_year = df['year'].isnull().sum()
-            if invalid_year > 0:
-                logging.warning(f'有{invalid_year}条主表数据因kprq/invoice_date缺失被丢弃')
-            df = df[df['year'].notnull()]
-            logging.info(f'主表数据各年度分布: {df["year"].value_counts().to_dict()}')
-            allowed_fields = [
-                "created_at", "created_by", "source_system", "is_balanced", "balance_tolerance"
-            ]
-            for year, df_year in df.groupby('year'):
-                table_name = f'ODS_VAT_INV_HEADER_FULL_{year}'
-                # 自动建表（如不存在）
-                conn.execute(f'''CREATE TABLE IF NOT EXISTS {table_name} (
-                    header_uuid TEXT, created_at TEXT, created_by TEXT, updated_at TEXT, updated_by TEXT, import_batch_id TEXT, source_system TEXT, source_file TEXT, sync_status TEXT, clean_status TEXT,
-                    detail_total_amount REAL, is_balanced TEXT, balance_diff REAL, balance_tolerance REAL, balance_check_time TEXT, balance_check_by TEXT, balance_notes TEXT,
-                    related_blue_invoice_uuid TEXT, fpdm TEXT, fphm TEXT, sdfphm TEXT, xfsbh TEXT, xfmc TEXT, gfsbh TEXT, gfmc TEXT, kprq TEXT, invoice_date TEXT, invoice_time TEXT,
-                    je REAL, se REAL, jshj REAL, fply TEXT, fppz TEXT, fpzt TEXT, sfzsfp TEXT, fpfxdj TEXT, kpr TEXT, bz TEXT
-                )''')
-                df_year.drop(columns=['year'], inplace=True)
-                df_year.to_sql(table_name, conn, if_exists='append', index=False)
-                logging.info(f'导入: {rel_excel_path} -> {table_name}, 行数: {len(df_year)}')
-                total_rows += len(df_year)
+            df['__source_file__'] = rel_excel_path
+            all_dfs.append(df)
         except Exception as e:
             logging.error(f'导入失败: {excel_path}, 错误: {e}')
+    if not all_dfs:
+        logging.error('无有效主表数据，终止处理。')
+        return
+    all_df = pd.concat(all_dfs, ignore_index=True)
+    # 剔除合计行：fpdm、fphm、sdfphm全为None/空字符串/空格
+    def is_all_empty(row):
+        return all((pd.isnull(row[col]) or str(row[col]).strip().replace('　', '') == "") for col in ['fpdm', 'fphm', 'sdfphm'])
+    before = len(all_df)
+    all_df = all_df[~all_df.apply(is_all_empty, axis=1)]
+    removed = before - len(all_df)
+    if removed > 0:
+        logging.info(f'剔除合计/无效行 {removed} 条（fpdm、fphm、sdfphm全为空/空字符串/空格）')
+    # 技术字段补齐、主键生成
+    for col in ['fpdm', 'fphm', 'sdfphm']:
+        if col in all_df.columns:
+            all_df[col] = all_df[col].apply(lambda x: str(x) if pd.notnull(x) else x)
+    def extract_date_time(val):
+        import re
+        if pd.isnull(val):
+            return None, None
+        if isinstance(val, pd.Timestamp):
+            d = val.strftime('%Y-%m-%d')
+            t = val.strftime('%H:%M:%S') if val.hour+val.minute+val.second > 0 else None
+            return d, t
+        s = str(val).strip()
+        m = re.match(r'(\d{4}[/-]\d{1,2}[/-]\d{1,2})', s)
+        date_part = m.group(1).replace('/', '-') if m else None
+        m2 = re.search(r'(\d{1,2}:\d{2}(:\d{2})?)', s)
+        time_part = m2.group(1) if m2 else None
+        if time_part and len(time_part.split(':'))==2:
+            time_part += ':00'
+        return date_part, time_part
+    all_df['invoice_date'], all_df['invoice_time'] = zip(*all_df['kprq'].map(extract_date_time))
+    import re
+    def extract_blue_uuid(bz):
+        if pd.isnull(bz):
+            return None
+        s = str(bz)
+        # 规则1：对应正数发票代码+号码
+        m = re.search(r'对应正数发票代码[:：]?(\d{10,20})[，, ]*号码[:：]?(\d{6,20})', s)
+        if m:
+            return str(m.group(1)) + str(m.group(2))
+        # 规则2：被红冲蓝字发票代码和号码同时出现，拼接
+        m_code = re.search(r'被红冲蓝字发票代码[:：]?(\d{10,20})', s)
+        m_num = re.search(r'被红冲蓝字发票号码[:：]?(\d{6,20})', s)
+        if m_code and m_num:
+            return str(m_code.group(1)) + str(m_num.group(1))
+        # 规则3：被红冲蓝字...号码
+        m2 = re.search(r'被红冲蓝字.*?号码[:：]?(\d{10,30})', s)
+        if m2:
+            return str(m2.group(1))
+        return None
+    all_df['related_blue_invoice_uuid'] = all_df['bz'].map(extract_blue_uuid)
+    all_df['header_uuid'] = all_df.apply(gen_header_uuid, axis=1)
+    all_df['import_batch_id'] = batch_id
+    all_df['source_system'] = source_system
+    all_df['source_file'] = all_df['__source_file__']
+    # 自动补齐主表四个关键字段的默认值
+    from datetime import datetime
+    now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    all_df['created_at'] = now_str if 'created_at' not in all_df.columns else all_df['created_at'].fillna(now_str)
+    all_df['created_by'] = 'SYSTEM' if 'created_by' not in all_df.columns else all_df['created_by'].fillna('SYSTEM')
+    all_df['is_balanced'] = '未校验' if 'is_balanced' not in all_df.columns else all_df['is_balanced'].fillna('未校验')
+    all_df['balance_tolerance'] = 0.1 if 'balance_tolerance' not in all_df.columns else all_df['balance_tolerance'].fillna(0.1)
+    # ====== 高性能唯一性校验（专用索引表）与导出 ======
+    cursor = conn.cursor()
+    # 新建 header_uuid 索引表，仅存储 header_uuid，并加唯一索引
+    cursor.execute('''CREATE TABLE IF NOT EXISTS ODS_VAT_INV_HEADER_UUID_INDEX (
+        header_uuid TEXT PRIMARY KEY
+    )''')
+    # 查询所有已存在 header_uuid（只查索引表，极高性能）
+    existing_uuids = set(row[0] for row in cursor.execute("SELECT header_uuid FROM ODS_VAT_INV_HEADER_UUID_INDEX"))
+    # 本批次内重复uuid
+    header_uuid_counts = all_df['header_uuid'].value_counts()
+    repeated_header_uuids = set(header_uuid_counts[header_uuid_counts > 1].index.tolist())
+    # 历史库和本批次重复uuid合集
+    all_repeated_uuids = repeated_header_uuids | existing_uuids
+    # 只保留唯一 header_uuid 的数据入库，所有重复（无论历史还是本批次）都导出
+    duplicated_header = all_df[all_df['header_uuid'].isin(all_repeated_uuids)]
+    to_insert = all_df[~all_df['header_uuid'].isin(all_repeated_uuids)].copy()
+    if not duplicated_header.empty:
+        ts = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+        header_outfile = f'ODS_被去重的主表_HEADER_{batch_id}_{ts}.xlsx'
+        header_outpath = os.path.join(BASE_DIR, 'Outputs', header_outfile)
+        duplicated_header.to_excel(header_outpath, index=False)
+        logging.warning(f'入库前检测到header_uuid与索引表重复 {len(duplicated_header)} 条，已导出到: {header_outpath}，所有重复主键已全部剔除，仅唯一数据入库')
+    # 后续处理只针对唯一 header_uuid 的 to_insert
+    # 在 to_insert 上补充 year 列并过滤
+    to_insert['year'] = to_insert['invoice_date'].apply(lambda x: str(x)[:4] if pd.notnull(x) and len(str(x)) >= 4 else None)
+    invalid_year = to_insert['year'].isnull().sum()
+    if invalid_year > 0:
+        logging.warning(f'有{invalid_year}条主表数据因kprq/invoice_date缺失被丢弃')
+    to_insert = to_insert[to_insert['year'].notnull()]
+    logging.info(f'主表数据各年度分布: {to_insert["year"].value_counts().to_dict()}')
+    allowed_fields = [
+        "created_at", "created_by", "source_system", "is_balanced", "balance_tolerance"
+    ]
+    for year, df_year in to_insert.groupby('year'):
+        table_name = f'ODS_VAT_INV_HEADER_FULL_{year}'
+        # 自动建表（如不存在）
+        conn.execute(f'''CREATE TABLE IF NOT EXISTS {table_name} (
+            header_uuid TEXT PRIMARY KEY, created_at TEXT, created_by TEXT, updated_at TEXT, updated_by TEXT, import_batch_id TEXT, source_system TEXT, source_file TEXT, sync_status TEXT, clean_status TEXT,
+            detail_total_amount REAL, is_balanced TEXT, balance_diff REAL, balance_tolerance REAL, balance_check_time TEXT, balance_check_by TEXT, balance_notes TEXT,
+            related_blue_invoice_uuid TEXT, fpdm TEXT, fphm TEXT, sdfphm TEXT, xfsbh TEXT, xfmc TEXT, gfsbh TEXT, gfmc TEXT, kprq TEXT, invoice_date TEXT, invoice_time TEXT,
+            je REAL, se REAL, jshj REAL, fply TEXT, fppz TEXT, fpzt TEXT, sfzsfp TEXT, fpfxdj TEXT, kpr TEXT, bz TEXT
+        )''')
+        df_year.drop(columns=['year', '__source_file__'], inplace=True)
+        df_year.to_sql(table_name, conn, if_exists='append', index=False)
+        logging.info(f'导入: {table_name}, 行数: {len(df_year)}')
+        total_rows += len(df_year)
+    # 入库后批量插入新 header_uuid 到索引表，保持索引表与业务表同步
+    if not to_insert.empty:
+        cursor.executemany("INSERT OR IGNORE INTO ODS_VAT_INV_HEADER_UUID_INDEX (header_uuid) VALUES (?)", [(uuid,) for uuid in to_insert['header_uuid']])
+        conn.commit()
     conn.close()
     logging.info(f'全部主表数据导入完成，总行数: {total_rows}')
 
