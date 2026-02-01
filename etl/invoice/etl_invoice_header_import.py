@@ -50,7 +50,9 @@ def find_all_excels(root_dir):
     return matches
 
 def main():
-    # 统一相对路径，递归遍历Source_Data下所有Excel
+    # === 0. 扫描源Excel并读取主表数据 ===
+    # WHY：统一从Source_Data收集本次所有发票基础信息，形成后续处理的原始数据集
+    # WHAT：递归扫描Excel，定位“发票基础信息”sheet，完成字段对齐与合并
     source_data_dir = os.path.join(BASE_DIR, 'Source_Data')
     excel_files = find_all_excels(source_data_dir)
     if not excel_files:
@@ -83,18 +85,53 @@ def main():
         logging.error('无有效主表数据，终止处理。')
         return
     all_df = pd.concat(all_dfs, ignore_index=True)
-    # 剔除合计行：fpdm、fphm、sdfphm全为None/空字符串/空格
-    def is_all_empty(row):
-        return all((pd.isnull(row[col]) or str(row[col]).strip().replace('　', '') == "") for col in ['fpdm', 'fphm', 'sdfphm'])
+
+    # === 1. 主键相关字段业务校验与清洗 ===
+    # WHY：确保每条主表记录至少有一种合法发票标识（纸票fpdm+fphm或数电票sdfphm），避免脏数据进入后续主键生成与下游清洗
+    # WHAT：
+    #   - 剔除 fpdm/fphm/sdfphm 三者全空的行
+    #   - 剔除只填 fpdm 或只填 fphm 且 sdfphm 为空的行
+    invalid_mask = (
+        (all_df['fpdm'].isnull() | (all_df['fpdm'].astype(str).str.strip() == '')) &
+        (all_df['fphm'].isnull() | (all_df['fphm'].astype(str).str.strip() == '')) &
+        (all_df['sdfphm'].isnull() | (all_df['sdfphm'].astype(str).str.strip() == ''))
+    )
+    only_one_filled = (
+        ((all_df['fpdm'].notnull() & (all_df['fpdm'].astype(str).str.strip() != '')) ^
+         (all_df['fphm'].notnull() & (all_df['fphm'].astype(str).str.strip() != '')))
+        & (all_df['sdfphm'].isnull() | (all_df['sdfphm'].astype(str).str.strip() == ''))
+    )
     before = len(all_df)
-    all_df = all_df[~all_df.apply(is_all_empty, axis=1)]
-    removed = before - len(all_df)
-    if removed > 0:
-        logging.info(f'剔除合计/无效行 {removed} 条（fpdm、fphm、sdfphm全为空/空字符串/空格）')
-    # 技术字段补齐、主键生成
+    all_df = all_df[~(invalid_mask | only_one_filled)].copy()
+    dropped = before - len(all_df)
+    if dropped > 0:
+        logging.warning(f'已剔除{dropped}条fpdm、fphm、sdfphm三者全空或只填一项的无效主表数据')
+
+    # === 2. 技术字段标准化与header_uuid生成 ===
+    # WHY：
+    #   - 统一发票标识字段类型，防止数值型被读成浮点等问题
+    #   - 生成全局唯一的header_uuid，作为后续ODS/DWD/ADS及质量校验的主键
+    # WHAT：
+    #   - 将 fpdm/fphm/sdfphm 统一转为字符串
+    #   - 按“数电优先”的规则生成 header_uuid：sdfphm 有值 → 仅用 sdfphm；否则用 fpdm+fphm
     for col in ['fpdm', 'fphm', 'sdfphm']:
         if col in all_df.columns:
             all_df[col] = all_df[col].apply(lambda x: str(x) if pd.notnull(x) else x)
+
+    # 3. header_uuid生成逻辑与明细表完全一致：
+    #   - 若sdfphm有值，仅用sdfphm生成header_uuid
+    #   - 否则用fpdm+fphm生成header_uuid
+    def gen_header_uuid_v2(row):
+        sdfphm = str(row.get('sdfphm', '')).strip() if not pd.isnull(row.get('sdfphm', '')) else ''
+        fpdm = str(row.get('fpdm', '')).strip() if not pd.isnull(row.get('fpdm', '')) else ''
+        fphm = str(row.get('fphm', '')).strip() if not pd.isnull(row.get('fphm', '')) else ''
+        if sdfphm:
+            key = sdfphm
+        else:
+            key = fpdm + fphm
+        key = key.replace('－', '-').replace('　', '').replace(' ', '')
+        return hashlib.md5(key.encode('utf-8')).hexdigest()
+    all_df['header_uuid'] = all_df.apply(gen_header_uuid_v2, axis=1)
     def extract_date_time(val):
         import re
         if pd.isnull(val):
@@ -132,7 +169,8 @@ def main():
             return str(m2.group(1))
         return None
     all_df['related_blue_invoice_uuid'] = all_df['bz'].map(extract_blue_uuid)
-    all_df['header_uuid'] = all_df.apply(gen_header_uuid, axis=1)
+    # 使用新规则生成header_uuid，确保与明细表一致
+    all_df['header_uuid'] = all_df.apply(gen_header_uuid_v2, axis=1)
     all_df['import_batch_id'] = batch_id
     all_df['source_system'] = source_system
     all_df['source_file'] = all_df['__source_file__']
@@ -141,9 +179,15 @@ def main():
     now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     all_df['created_at'] = now_str if 'created_at' not in all_df.columns else all_df['created_at'].fillna(now_str)
     all_df['created_by'] = 'SYSTEM' if 'created_by' not in all_df.columns else all_df['created_by'].fillna('SYSTEM')
+    # 平账相关技术字段默认值：仅做初始化，不在导入阶段进行平账判断
     all_df['is_balanced'] = '未校验' if 'is_balanced' not in all_df.columns else all_df['is_balanced'].fillna('未校验')
     all_df['balance_tolerance'] = 0.1 if 'balance_tolerance' not in all_df.columns else all_df['balance_tolerance'].fillna(0.1)
-    # ====== 高性能唯一性校验（专用索引表）与导出 ======
+
+    # ====== 3. 高性能唯一性校验（专用索引表）与导出 ======
+    # WHY：在全库范围内保障header_uuid唯一，避免重复主键污染ODS主表
+    # WHAT：
+    #   - 使用独立的索引表 ODS_VAT_INV_HEADER_UUID_INDEX 维护全局header_uuid集合
+    #   - 本批次内部先做去重，再与索引表做比对，重复数据导出Excel供后续核查
     cursor = conn.cursor()
     # 新建 header_uuid 索引表，仅存储 header_uuid，并加唯一索引
     cursor.execute('''CREATE TABLE IF NOT EXISTS ODS_VAT_INV_HEADER_UUID_INDEX (
@@ -176,6 +220,11 @@ def main():
     allowed_fields = [
         "created_at", "created_by", "source_system", "is_balanced", "balance_tolerance"
     ]
+    # ====== 4. 按年度入库ODS主表 ======
+    # WHY：按照年度分表（ODS_VAT_INV_HEADER_FULL_YYYY）落地主表数据，便于后续分区管理和批量处理
+    # WHAT：
+    #   - 按year分组，逐年建表（如不存在）并append写入
+    #   - 仅写入本批次中通过唯一性校验的记录
     for year, df_year in to_insert.groupby('year'):
         table_name = f'ODS_VAT_INV_HEADER_FULL_{year}'
         # 自动建表（如不存在）

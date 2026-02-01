@@ -56,6 +56,9 @@ def find_all_excels(root_dir):
     return matches
 
 def main():
+    # === 0. 扫描源Excel并读取明细数据 ===
+    # WHY：统一收集Source_Data下所有发票明细（信息汇总表），形成后续逻辑行号与主键生成的原始数据集
+    # WHAT：递归扫描Excel，优先选择“信息汇总表”sheet（或字段重合度最高的sheet），完成字段对齐与合并
     # 合并所有Excel后再生成invoice_date和invoice_time
     def extract_date_time(val):
         import re
@@ -126,28 +129,63 @@ def main():
         return
     all_df = pd.concat(all_dfs, ignore_index=True)
     all_df['invoice_date'], all_df['invoice_time'] = zip(*all_df['kprq'].map(extract_date_time))
-    # 在 detail_uuid 去重前，统计和打印 kprq 字段的分布，便于确认原始数据问题
-    logging.info(f'原始明细数据 kprq 字段样本: {all_df["kprq"].head(10).tolist()}')
-    kprq_null = all_df["kprq"].isnull().sum()
-    kprq_empty = (all_df["kprq"].astype(str).str.strip() == '').sum()
-    logging.info(f'原始明细数据 kprq 字段缺失行数: {kprq_null}，空字符串行数: {kprq_empty}，总行数: {len(all_df)}')
-    # 统计 kprq 字段的年度分布
-    def extract_year(val):
-        import re
-        if pd.isnull(val):
-            return None
-        s = str(val).strip()
-        m = re.match(r'(\d{4})[/-]\d{1,2}[/-]\d{1,2}', s)
-        return m.group(1) if m else None
-    all_df['year'] = all_df['kprq'].map(extract_year)
-    year_counts = all_df['year'].value_counts().to_dict()
-    logging.info(f'原始明细数据各年度分布: {year_counts}')
-    # 先为 all_df 赋值分组行号，再生成 detail_uuid
-    all_df['_logic_line_no_check'] = all_df.groupby(['fpdm','fphm','sdfphm']).cumcount() + 1
-    all_df['logic_line_no'] = all_df['_logic_line_no_check']
-    # 补全所有logic_line_no为null的行（极端情况）
-    if all_df['logic_line_no'].isnull().any():
-        all_df['logic_line_no'] = all_df['logic_line_no'].fillna(1).astype(int)
+
+    # === 1. 明细关键字段业务校验与清洗 ===
+    # WHY：确保每条明细行都能归属于一张合法发票（纸票fpdm+fphm或数电票sdfphm），避免逻辑行号与detail_uuid在脏数据上生成
+    # WHAT：
+    #   - 剔除 fpdm/fphm/sdfphm 三者全空的行
+    #   - 剔除只填 fpdm 或只填 fphm 且 sdfphm 为空的行
+    invalid_mask = (
+        (all_df['fpdm'].isnull() | (all_df['fpdm'].astype(str).str.strip() == '')) &
+        (all_df['fphm'].isnull() | (all_df['fphm'].astype(str).str.strip() == '')) &
+        (all_df['sdfphm'].isnull() | (all_df['sdfphm'].astype(str).str.strip() == ''))
+    )
+    only_one_filled = (
+        ((all_df['fpdm'].notnull() & (all_df['fpdm'].astype(str).str.strip() != '')) ^
+         (all_df['fphm'].notnull() & (all_df['fphm'].astype(str).str.strip() != '')))
+        & (all_df['sdfphm'].isnull() | (all_df['sdfphm'].astype(str).str.strip() == ''))
+    )
+    before = len(all_df)
+    all_df = all_df[~(invalid_mask | only_one_filled)].copy()
+    dropped = before - len(all_df)
+    if dropped > 0:
+        logging.warning(f'已剔除{dropped}条fpdm、fphm、sdfphm三者全空或只填一项的无效数据')
+
+    # === 2. 动态分组生成logic_line_no（逻辑行号）===
+    # WHY：为同一张发票下的多条明细生成稳定、可追溯的行号，支撑 detail_uuid 唯一键与后续对账
+    # WHAT：
+    #   - 对数电发票：按 sdfphm 分组，组内按出现顺序编号 1,2,3...
+    #   - 对纸票：按 fpdm+fphm 分组，组内按出现顺序编号 1,2,3...
+    #   - 如极端情况下仍有行未能分配行号，则补为1并输出告警
+    def assign_logic_line_no(df):
+        # 数电发票优先
+        mask_sdfphm = df['sdfphm'].notnull() & (df['sdfphm'].astype(str).str.strip() != '')
+        mask_fpdmfphm = df['fpdm'].notnull() & (df['fpdm'].astype(str).str.strip() != '') & \
+                        df['fphm'].notnull() & (df['fphm'].astype(str).str.strip() != '')
+        df['logic_line_no'] = None
+        # 先处理数电发票
+        if mask_sdfphm.any():
+            df.loc[mask_sdfphm, 'logic_line_no'] = df[mask_sdfphm].groupby('sdfphm').cumcount() + 1
+        # 再处理纸票
+        if mask_fpdmfphm.any():
+            df.loc[mask_fpdmfphm, 'logic_line_no'] = df[mask_fpdmfphm].groupby(['fpdm', 'fphm']).cumcount() + 1
+        # 补全所有logic_line_no为null的行（极端情况，理论上不会出现）
+        if df['logic_line_no'].isnull().any():
+            logging.warning(f'有{df["logic_line_no"].isnull().sum()}条数据未能正确分配logic_line_no，已补为1，请检查数据源！')
+            df['logic_line_no'] = df['logic_line_no'].fillna(1).astype(int)
+        else:
+            df['logic_line_no'] = df['logic_line_no'].astype(int)
+        return df
+
+    all_df = assign_logic_line_no(all_df)
+
+    # === 3. 生成header_uuid、detail_uuid，保证唯一性 ===
+    # WHY：
+    #   - header_uuid：与主表保持一致的发票级唯一标识
+    #   - detail_uuid：在发票+逻辑行号维度上的明细级唯一标识，用于ODS层去重与下游关联
+    # WHAT：
+    #   - header_uuid 依据 fpdm/fphm/sdfphm 生成
+    #   - detail_uuid 依据 fpdm/fphm/sdfphm + logic_line_no 生成，并写入 _detail_uuid_check 以支持批次/全库去重
     all_df['header_uuid'] = all_df.apply(lambda row: gen_header_uuid(row), axis=1)
     all_df['_detail_uuid_check'] = all_df.apply(lambda row: gen_detail_uuid({
         'fpdm': row.get('fpdm', ''),
@@ -155,8 +193,12 @@ def main():
         'sdfphm': row.get('sdfphm', ''),
         'logic_line_no': row['logic_line_no']
     }), axis=1)
-    # ====== 批量填充ODS所有字段，确保每个字段有值 ======
-    # import_batch_id、source_system、source_file、updated_at、updated_by、sync_status、clean_status等技术字段
+    # ====== 4. 批量填充ODS所有字段，确保每个字段有值 ======
+    # WHY：ODS层需要完整的技术字段与业务字段，供后续质量校验与下游建模使用
+    # WHAT：
+    #   - 填充 import_batch_id、source_system、source_file 等技术字段
+    #   - 初始化 updated_at/updated_by/sync_status/clean_status
+    #   - 对缺失的ODS字段统一补空字符串，保证列齐全
     now_str = pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')
     all_df['import_batch_id'] = batch_id
     all_df['source_system'] = source_system
@@ -172,10 +214,19 @@ def main():
     for col in ODS_DETAIL_COLUMNS:
         if col not in all_df.columns:
             all_df[col] = ''
-    # 再次确保logic_line_no无null
+    # 再次确保logic_line_no无null（防御性代码，防止前面重组过程引入空值）
     if all_df['logic_line_no'].isnull().any():
         all_df['logic_line_no'] = all_df['logic_line_no'].fillna(1).astype(int)
-    # 按年度分别统计 detail_uuid 重复情况
+    # 基于kprq识别year字段，用于按年度统计重复情况
+    def extract_year(val):
+        import re
+        if pd.isnull(val):
+            return None
+        s = str(val).strip()
+        m = re.match(r'(\d{4})[/-]\d{1,2}[/-]\d{1,2}', s)
+        return m.group(1) if m else None
+    all_df['year'] = all_df['kprq'].map(extract_year)
+    # 按年度分别统计 detail_uuid 重复情况（仅用于日志监控，不影响入库）
     for year, df_year in all_df.groupby('year'):
         if year is None:
             continue
@@ -185,7 +236,11 @@ def main():
     # 去除所有重复列，只保留最后一列，彻底避免 Series 歧义：
     all_df = all_df.loc[:, ~all_df.columns.duplicated(keep='last')]
 
-    # ====== 高性能唯一性校验（专用索引表）与导出 ======
+    # ====== 5. 高性能唯一性校验（专用索引表）与导出 ======
+    # WHY：在全库范围内保障 detail_uuid 唯一，避免重复明细污染ODS及下游分析
+    # WHAT：
+    #   - 使用独立索引表 ODS_VAT_INV_DETAIL_UUID_INDEX 维护全局 detail_uuid 集合
+    #   - 本批次内部先根据 _detail_uuid_check 去重，再与索引表比对，重复数据导出Excel供核查
     cursor = conn.cursor()
     # 新建 detail_uuid 索引表，仅存储 detail_uuid，并加唯一索引
     cursor.execute('''CREATE TABLE IF NOT EXISTS ODS_VAT_INV_DETAIL_UUID_INDEX (
@@ -200,10 +255,10 @@ def main():
     all_repeated_uuids = repeated_detail_uuids | existing_uuids
     duplicated_detail = all_df[all_df['_detail_uuid_check'].isin(all_repeated_uuids)]
     to_insert = all_df[~all_df['_detail_uuid_check'].isin(all_repeated_uuids)].copy()
-    # 保证导出和入库前都只保留ODS字段
+    # 保证导出和入库前都只保留ODS字段，去除 __source_file__ 等技术中间列
     duplicated_detail = duplicated_detail[[col for col in ODS_DETAIL_COLUMNS if col in duplicated_detail.columns]]
     to_insert = to_insert[[col for col in ODS_DETAIL_COLUMNS if col in to_insert.columns]]
-    # 补全DataFrame重组后logic_line_no的缺失
+    # 补全DataFrame重组后logic_line_no的缺失（极端防御）
     for df_tmp in [duplicated_detail, to_insert]:
         if 'logic_line_no' in df_tmp.columns and df_tmp['logic_line_no'].isnull().any():
             df_tmp['logic_line_no'] = df_tmp['logic_line_no'].fillna(1).astype(int)
@@ -247,6 +302,11 @@ def main():
         if time_part and len(time_part.split(':'))==2:
             time_part += ':00'
         return date_part, time_part
+    # ====== 6. 按年度入库ODS明细表 ======
+    # WHY：按照年度分表（ODS_VAT_INV_DETAIL_FULL_YYYY）落地明细数据，便于后续分区管理和质量监控
+    # WHAT：
+    #   - 基于kprq识别year，丢弃无法识别年份的行并记录日志
+    #   - 按year分组，逐年建表并append写入，仅写入通过唯一性校验的记录
     # 健壮性处理：year为空的行丢弃，统计分布（修正：year基于kprq字段识别）
     all_df['year'] = all_df['kprq'].apply(lambda x: str(x)[:4] if pd.notnull(x) and len(str(x)) >= 4 else None)
     invalid_year = all_df['year'].isnull().sum()
